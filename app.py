@@ -17,7 +17,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://topic-modeling-theta.vercel.app/",
+        "https://topic-modeling-theta.vercel.app",
         "http://localhost:5173"
     ],
     allow_credentials=True,
@@ -41,7 +41,7 @@ class CompareRequest(BaseModel):
 # Cache
 cache = {}
 
-# 📰 GOOGLE NEWS
+# GOOGLE NEWS
 def get_google_news(name):
     url = f"https://news.google.com/rss/search?q={name.replace(' ', '+')}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
@@ -54,7 +54,7 @@ def get_google_news(name):
 
     return texts
 
-# 📰 BING NEWS
+# BING NEWS
 def get_bing_news(name):
     url = f"https://www.bing.com/news/search?q={name.replace(' ', '+')}&format=rss"
     feed = feedparser.parse(url)
@@ -67,7 +67,7 @@ def get_bing_news(name):
 
     return texts
 
-# 📰 DUCKDUCKGO
+# DUCKDUCKGO
 def get_ddg_news(name):
     url = f"https://duckduckgo.com/html/?q={name.replace(' ', '+')}+news"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -84,7 +84,7 @@ def get_ddg_news(name):
     except:
         return []
 
-# 🎥 YOUTUBE METADATA
+# YOUTUBE METADATA
 def get_youtube_text(name, limit=5):
     try:
         results = VideosSearch(f"{name} speech", limit=limit).result()
@@ -103,7 +103,7 @@ def get_youtube_text(name, limit=5):
     except:
         return []
 
-# 🧠 MERGE + RANK
+# Mering
 def get_combined_data(name):
     google = get_google_news(name)
     bing = get_bing_news(name)
