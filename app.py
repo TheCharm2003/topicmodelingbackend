@@ -29,11 +29,10 @@ class CompareRequest(BaseModel):
     leaders: list
 
 
-# -------- CACHE (IMPORTANT FOR SPEED) --------
+# Storing
 cache = {}
 
-
-# -------- SCRAPING --------
+# Transcript
 def get_transcript(video_id):
     try:
         t = YouTubeTranscriptApi.get_transcript(video_id)
@@ -57,7 +56,6 @@ def scrape(name):
     return pd.DataFrame(rows)
 
 
-# -------- CLEANING --------
 def clean(text):
     text = re.sub(r'[^a-zA-Z ]', '', text.lower())
     return " ".join([
@@ -67,7 +65,7 @@ def clean(text):
     ])
 
 
-# -------- TOPIC MODELING --------
+# TOPIC MODELING
 def get_topics(df, n_topics=3):
     vec = CountVectorizer(max_df=0.9, stop_words='english')
     X = vec.fit_transform(df['clean'])
@@ -87,7 +85,7 @@ def get_topics(df, n_topics=3):
     return topics
 
 
-# -------- PIPELINE --------
+# Helper
 def process_leader(name):
     if name in cache:
         return cache[name]
@@ -111,26 +109,11 @@ def process_leader(name):
     return result
 
 
-# -------- ROUTES --------
-
+# APIS
 # Health check
 @app.get("/")
 def health():
-    return {"status": "alive"}
-
-
-# Single leader analysis
-@app.post("/analyze")
-def analyze(req: LeaderRequest):
-    return process_leader(req.name)
-
-
-# Topics only
-@app.post("/topics")
-def topics(req: LeaderRequest):
-    data = process_leader(req.name)
-    return {"leader": req.name, "topics": data.get("topics", [])}
-
+    return {"status": "Running"}
 
 # Compare leaders
 @app.post("/compare")
