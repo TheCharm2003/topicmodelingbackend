@@ -39,12 +39,9 @@ app.add_middleware(
 def setup_nltk():
     try:
         nltk.data.find('corpora/stopwords')
-    except:
-        nltk.download('stopwords')
-
-    try:
         nltk.data.find('corpora/wordnet')
     except:
+        nltk.download('stopwords')
         nltk.download('wordnet')
 
 setup_nltk()
@@ -219,7 +216,7 @@ def process_leader(name, n_topics):
         "avg_sentiment": df['sentiment'].mean(),
         "topics": get_topics(df, n_topics),
         "wordcloud": generate_wordcloud(df['clean'].tolist()),
-        "graph": generate_wordcloud(df['clean'].tolist()),
+        "graph": generate_knowledge_graph(df['clean'].tolist()),
     }
 
 #  APIs
