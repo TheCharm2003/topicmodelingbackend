@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import re
@@ -11,6 +12,16 @@ from sklearn.decomposition import LatentDirichletAllocation
 
 # Setup
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://topic-modeling-theta.vercel.app/",
+        "http://localhost:5173"
+    ],    
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 nltk.download('stopwords')
 nltk.download('wordnet')
