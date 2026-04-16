@@ -21,7 +21,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://topic-modeling-theta.vercel.app",
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "https://dashboard.uptimerobot.com/monitors/802861244"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -41,9 +42,6 @@ lemmatizer = WordNetLemmatizer()
 class CompareRequest(BaseModel):
     leaders: list[str]
     n_topics: int = 3 
-
-# Cache
-cache = {}
 
 # GOOGLE NEWS
 def get_google_news(name):
@@ -192,9 +190,6 @@ def generate_wordcloud(texts):
 
 # MAIN PROCESS
 def process_leader(name, n_topics):
-    if name in cache:
-        return cache[name]
-
     df = get_combined_data(name)
 
     if df.empty:
@@ -220,7 +215,6 @@ def process_leader(name, n_topics):
         "wordcloud": wordcloud_img
     }
 
-    cache[name] = result
     return result
 
 # APIs
