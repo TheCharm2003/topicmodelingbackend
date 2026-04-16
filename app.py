@@ -11,6 +11,9 @@ from youtubesearchpython import VideosSearch
 from textblob import TextBlob
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
+from wordcloud import WordCloud
+import io
+import base64
 
 # Setup
 app = FastAPI()
@@ -36,7 +39,8 @@ lemmatizer = WordNetLemmatizer()
 
 # REQUEST MODEL
 class CompareRequest(BaseModel):
-    leaders: list
+    leaders: list[str]
+    n_topics: int = 3 
 
 # Cache
 cache = {}
@@ -103,7 +107,7 @@ def get_youtube_text(name, limit=5):
     except:
         return []
 
-# Mering
+# Merging
 def get_combined_data(name):
     google = get_google_news(name)
     bing = get_bing_news(name)
@@ -167,8 +171,27 @@ def get_topics(df, n_topics=3):
 
     return topics
 
+# WordCloud
+def generate_wordcloud(texts):
+    if not texts:
+        return None
+
+    text = " ".join(texts)
+
+    wc = WordCloud(
+        width=800,
+        height=400,
+        background_color='white'
+    ).generate(text)
+
+    img = io.BytesIO()
+    wc.to_image().save(img, format='PNG')
+    img.seek(0)
+
+    return base64.b64encode(img.getvalue()).decode()
+
 # MAIN PROCESS
-def process_leader(name):
+def process_leader(name, n_topics):
     if name in cache:
         return cache[name]
 
@@ -186,11 +209,15 @@ def process_leader(name):
         lambda x: TextBlob(x).sentiment.polarity
     )
 
+    topics = get_topics(df, n_topics=n_topics)
+    wordcloud_img = generate_wordcloud(df['clean'].tolist())
+
     result = {
         "leader": name,
         "speech_count": len(df),
         "avg_sentiment": df['sentiment'].mean(),
-        "topics": get_topics(df)
+        "topics": topics,
+        "wordcloud": wordcloud_img
     }
 
     cache[name] = result
@@ -207,7 +234,7 @@ def compare(req: CompareRequest):
 
     for name in req.leaders:
         try:
-            results[name] = process_leader(name)
+            results[name] = process_leader(name, req.n_topics) 
         except Exception as e:
             results[name] = {"error": str(e)}
 
