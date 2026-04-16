@@ -14,23 +14,40 @@ from sklearn.decomposition import LatentDirichletAllocation
 from wordcloud import WordCloud
 import io
 import base64
+import os
+import matplotlib
+from collections import Counter, defaultdict
+import itertools
 
-# Setup
+matplotlib.use("Agg")
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
+
+# FastAPI setup
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://topic-modeling-theta.vercel.app",
-        "http://localhost:5173",
-        "https://dashboard.uptimerobot.com/monitors/802861244"
+        "http://localhost:5173"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-nltk.download('stopwords')
-nltk.download('wordnet')
+def setup_nltk():
+    try:
+        nltk.data.find('corpora/stopwords')
+    except:
+        nltk.download('stopwords')
+
+    try:
+        nltk.data.find('corpora/wordnet')
+    except:
+        nltk.download('wordnet')
+
+setup_nltk()
 
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
@@ -41,98 +58,69 @@ lemmatizer = WordNetLemmatizer()
 # REQUEST MODEL
 class CompareRequest(BaseModel):
     leaders: list[str]
-    n_topics: int = 3 
+    n_topics: int = 3
 
-# GOOGLE NEWS
+# DATA SOURCES
+
 def get_google_news(name):
     url = f"https://news.google.com/rss/search?q={name.replace(' ', '+')}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
 
-    texts = []
-    for entry in feed.entries[:10]:
-        title = entry.title.lower()
-        summary = entry.summary.lower() if 'summary' in entry else ""
-        texts.append(title + " " + summary)
+    return [
+        (entry.title + " " + entry.get("summary", "")).lower()
+        for entry in feed.entries[:10]
+    ]
 
-    return texts
-
-# BING NEWS
 def get_bing_news(name):
     url = f"https://www.bing.com/news/search?q={name.replace(' ', '+')}&format=rss"
     feed = feedparser.parse(url)
 
-    texts = []
-    for entry in feed.entries[:10]:
-        title = entry.title.lower()
-        summary = entry.summary.lower() if 'summary' in entry else ""
-        texts.append(title + " " + summary)
+    return [
+        (entry.title + " " + entry.get("summary", "")).lower()
+        for entry in feed.entries[:10]
+    ]
 
-    return texts
-
-# DUCKDUCKGO
 def get_ddg_news(name):
-    url = f"https://duckduckgo.com/html/?q={name.replace(' ', '+')}+news"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        url = f"https://duckduckgo.com/html/?q={name.replace(' ', '+')}+news"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        results = []
-        for a in soup.select(".result__a")[:10]:
-            results.append(a.get_text().lower())
-
-        return results
+        return [a.get_text().lower() for a in soup.select(".result__a")[:10]]
     except:
         return []
 
-# YOUTUBE METADATA
 def get_youtube_text(name, limit=5):
     try:
         results = VideosSearch(f"{name} speech", limit=limit).result()
-
         texts = []
+
         for v in results['result']:
             title = v.get('title', '')
-            desc = ""
-
-            if v.get('descriptionSnippet'):
-                desc = " ".join([d['text'] for d in v['descriptionSnippet']])
-
+            desc = " ".join([d['text'] for d in v.get('descriptionSnippet', [])])
             texts.append((title + " " + desc).lower())
 
         return texts
     except:
         return []
 
-# Merging
+# PROCESSING
 def get_combined_data(name):
-    google = get_google_news(name)
-    bing = get_bing_news(name)
-    ddg = get_ddg_news(name)
-    yt = get_youtube_text(name)
-
-    all_texts = google + bing + ddg + yt
+    texts = (
+        get_google_news(name)
+        + get_bing_news(name)
+        + get_ddg_news(name)
+        + get_youtube_text(name)
+    )
 
     scored = []
-
-    for text in all_texts:
-        score = 0
-
-        if name.lower() in text:
-            score += 3
-
-        score += len(text.split()) / 50
-
+    for text in texts:
+        score = (3 if name.lower() in text else 0) + len(text.split()) / 50
         scored.append((score, text))
 
-    scored.sort(reverse=True, key=lambda x: x[0])
+    scored.sort(reverse=True)
+    return pd.DataFrame({"speech": [t for _, t in scored[:15]]})
 
-    top_texts = [text for score, text in scored[:15]]
-
-    return pd.DataFrame({"speech": top_texts})
-
-# CLEANING
 def clean(text):
     text = re.sub(r'http\S+', '', text)
     text = re.sub(r'[^a-zA-Z ]', '', text.lower())
@@ -143,9 +131,8 @@ def clean(text):
         if w not in stop_words and len(w) > 2
     ])
 
-# TOPIC MODELING
 def get_topics(df, n_topics=3):
-    if len(df) < 3 or df['clean'].str.strip().eq('').all():
+    if df.empty:
         return []
 
     vec = CountVectorizer(max_df=0.9, stop_words='english')
@@ -160,16 +147,14 @@ def get_topics(df, n_topics=3):
 
     words = vec.get_feature_names_out()
 
-    topics = []
-    for i, t in enumerate(lda.components_):
-        topics.append({
+    return [
+        {
             "topic_id": i,
             "keywords": [words[j] for j in t.argsort()[-5:]]
-        })
+        }
+        for i, t in enumerate(lda.components_)
+    ]
 
-    return topics
-
-# WordCloud
 def generate_wordcloud(texts):
     if not texts:
         return None
@@ -179,7 +164,8 @@ def generate_wordcloud(texts):
     wc = WordCloud(
         width=800,
         height=400,
-        background_color='white'
+        background_color='white',
+        font_path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     ).generate(text)
 
     img = io.BytesIO()
@@ -188,7 +174,33 @@ def generate_wordcloud(texts):
 
     return base64.b64encode(img.getvalue()).decode()
 
-# MAIN PROCESS
+def generate_knowledge_graph(texts, top_n=20):
+    if not texts:
+        return {"nodes": [], "edges": []}
+
+    words = []
+    for t in texts:
+        words.extend(t.split())
+
+    common = [w for w, _ in Counter(words).most_common(top_n)]
+    nodes = [{"id": w, "label": w} for w in common]
+
+    # co-occurrence edges
+    edge_weights = defaultdict(int)
+
+    for t in texts:
+        tokens = set(t.split()) & set(common)
+        for a, b in itertools.combinations(tokens, 2):
+            edge_weights[(a, b)] += 1
+
+    edges = [
+        {"source": a, "target": b, "weight": w}
+        for (a, b), w in edge_weights.items()
+        if w > 1
+    ]
+
+    return {"nodes": nodes, "edges": edges}
+
 def process_leader(name, n_topics):
     df = get_combined_data(name)
 
@@ -197,39 +209,27 @@ def process_leader(name, n_topics):
 
     df['clean'] = df['speech'].apply(clean)
 
-    if df['clean'].str.strip().eq('').all():
-        return {"leader": name, "error": "No valid text"}
-
     df['sentiment'] = df['speech'].apply(
         lambda x: TextBlob(x).sentiment.polarity
     )
 
-    topics = get_topics(df, n_topics=n_topics)
-    wordcloud_img = generate_wordcloud(df['clean'].tolist())
-
-    result = {
+    return {
         "leader": name,
         "speech_count": len(df),
         "avg_sentiment": df['sentiment'].mean(),
-        "topics": topics,
-        "wordcloud": wordcloud_img
+        "topics": get_topics(df, n_topics),
+        "wordcloud": generate_wordcloud(df['clean'].tolist()),
+        "graph": generate_wordcloud(df['clean'].tolist()),
     }
 
-    return result
-
-# APIs
+#  APIs
 @app.get("/")
 def health():
     return {"status": "Running"}
 
 @app.post("/compare")
 def compare(req: CompareRequest):
-    results = {}
-
-    for name in req.leaders:
-        try:
-            results[name] = process_leader(name, req.n_topics) 
-        except Exception as e:
-            results[name] = {"error": str(e)}
-
-    return results
+    return {
+        name: process_leader(name, req.n_topics)
+        for name in req.leaders
+    }
