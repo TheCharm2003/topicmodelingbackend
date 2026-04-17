@@ -20,8 +20,8 @@ import base64
 import os
 import matplotlib
 from collections import Counter, defaultdict
-from datetime import date
 import itertools
+
 matplotlib.use("Agg")
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 
@@ -33,7 +33,7 @@ app.add_middleware(
     allow_origins=[
         "https://topic-modeling-theta.vercel.app",
         "http://localhost:5173",
-        "http://127.0.0.1:8000",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -59,16 +59,13 @@ lemmatizer = WordNetLemmatizer()
 _DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_PATH = _DEJAVU if os.path.exists(_DEJAVU) else None
 
-_CACHE = {}
-def _cache_key(name, n_topics):
-    return (name.lower(), int(n_topics), date.today().isoformat())
-
 # REQUEST MODEL
 class CompareRequest(BaseModel):
     leaders: list[str]
     n_topics: int = 3
 
 # DATA SOURCES
+
 def fetch_article_body(url, max_words=500):
     if not url:
         return ""
@@ -232,20 +229,19 @@ def get_combined_data(name):
     scored.sort(reverse=True)
     return pd.DataFrame({"speech": [t for _, t in scored[:20]]})
 
-def clean(text, name=""):
+def clean(text, extra_stopwords=frozenset()):
     text = re.sub(r'http\S+', '', text)
     text = re.sub(r'[^a-zA-Z ]', '', text.lower())
 
-    if name:
-        name_parts = name.lower().split()
-        for part in name_parts:
-            text = re.sub(rf'\b{re.escape(part)}\b', '', text)
-
-    return " ".join([
-        lemmatizer.lemmatize(w)
-        for w in text.split()
-        if w not in stop_words and len(w) > 2
-    ])
+    out = []
+    for w in text.split():
+        if w in stop_words or len(w) <= 2:
+            continue
+        w = lemmatizer.lemmatize(w)
+        if w in extra_stopwords:
+            continue
+        out.append(w)
+    return " ".join(out)
 
 def get_topics(df, n_topics=3):
     if df.empty:
@@ -292,7 +288,8 @@ def generate_wordcloud(texts):
 
 def generate_knowledge_graph(texts, top_n=20):
     # Nodes = the top_n most frequent words across all snippets.
-    # Edges = co-occurrence: two words appearing in the same snippet.   
+    # Edges = co-occurrence: two words appearing in the same snippet.
+    # Weight = how many snippets they both appear in.
     if not texts:
         return {"nodes": [], "edges": []}
 
@@ -319,22 +316,28 @@ def generate_knowledge_graph(texts, top_n=20):
     return {"nodes": nodes, "edges": edges}
 
 def process_leader(name, n_topics):
-    key = _cache_key(name, n_topics)
-    if key in _CACHE:
-        return _CACHE[key]
-
     df = get_combined_data(name)
 
     if df.empty:
         return {"leader": name, "error": "No data found"}
 
-    df['clean'] = df['speech'].apply(lambda x: clean(x, name))
+    name_tokens = set()
+    for word in name.lower().split():
+        if len(word) > 2:
+            name_tokens.add(word)
+            name_tokens.add(lemmatizer.lemmatize(word))
+    extra_stop = name_tokens | {
+        "said", "say", "says", "told", "speech", "speeches",
+        "video", "watch", "youtube", "news",
+    }
+
+    df['clean'] = df['speech'].apply(lambda t: clean(t, extra_stop))
 
     df['sentiment'] = df['speech'].apply(
         lambda x: TextBlob(x).sentiment.polarity
     )
 
-    result = {
+    return {
         "leader": name,
         "speech_count": len(df),
         "avg_sentiment": df['sentiment'].mean(),
@@ -342,8 +345,6 @@ def process_leader(name, n_topics):
         "wordcloud": generate_wordcloud(df['clean'].tolist()),
         "graph": generate_knowledge_graph(df['clean'].tolist()),
     }
-    _CACHE[key] = result
-    return result
 
 #  APIs
 @app.get("/")
