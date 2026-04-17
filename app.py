@@ -7,7 +7,10 @@ import nltk
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-from youtubesearchpython import VideosSearch
+from youtubesearchpython import VideosSearch, ChannelsSearch
+from youtube_transcript_api import YouTubeTranscriptApi
+import trafilatura
+from concurrent.futures import ThreadPoolExecutor
 from textblob import TextBlob
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
@@ -17,6 +20,7 @@ import base64
 import os
 import matplotlib
 from collections import Counter, defaultdict
+from datetime import date
 import itertools
 
 matplotlib.use("Agg")
@@ -29,7 +33,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://topic-modeling-theta.vercel.app",
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -52,6 +59,17 @@ from nltk.stem import WordNetLemmatizer
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
+# The Linux server has DejaVu; on macOS/Windows the path is missing,
+# so fall back to WordCloud's default font instead of crashing.
+_DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+FONT_PATH = _DEJAVU if os.path.exists(_DEJAVU) else None
+
+# In-memory cache keyed by (leader, n_topics, today). Second call for
+# the same leader on the same day is instant — useful during the demo.
+_CACHE = {}
+def _cache_key(name, n_topics):
+    return (name.lower(), int(n_topics), date.today().isoformat())
+
 # REQUEST MODEL
 class CompareRequest(BaseModel):
     leaders: list[str]
@@ -59,22 +77,57 @@ class CompareRequest(BaseModel):
 
 # DATA SOURCES
 
+def fetch_article_body(url, max_words=500):
+    # Download the article HTML and extract just the body text.
+    # trafilatura strips ads, navbars, cookie banners, comments, etc.
+    # We cap words so a 5000-word investigative piece doesn't drown out
+    # the other snippets when LDA runs.
+    if not url:
+        return ""
+    try:
+        res = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+            allow_redirects=True,
+        )
+        if res.status_code != 200:
+            return ""
+        text = trafilatura.extract(res.text) or ""
+        return " ".join(text.split()[:max_words])
+    except Exception:
+        return ""
+
+def fetch_bodies_parallel(urls, max_workers=5):
+    # Fetch many article URLs at once. Without this, 5 articles at ~3s
+    # each = 15s; in parallel it collapses to ~3s total.
+    if not urls:
+        return []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(fetch_article_body, urls))
+
 def get_google_news(name):
     url = f"https://news.google.com/rss/search?q={name.replace(' ', '+')}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
+    entries = feed.entries[:8]
+
+    bodies = fetch_bodies_parallel([e.get("link", "") for e in entries])
 
     return [
-        (entry.title + " " + entry.get("summary", "")).lower()
-        for entry in feed.entries[:10]
+        (e.title + " " + e.get("summary", "") + " " + body).lower()
+        for e, body in zip(entries, bodies)
     ]
 
 def get_bing_news(name):
     url = f"https://www.bing.com/news/search?q={name.replace(' ', '+')}&format=rss"
     feed = feedparser.parse(url)
+    entries = feed.entries[:8]
+
+    bodies = fetch_bodies_parallel([e.get("link", "") for e in entries])
 
     return [
-        (entry.title + " " + entry.get("summary", "")).lower()
-        for entry in feed.entries[:10]
+        (e.title + " " + e.get("summary", "") + " " + body).lower()
+        for e, body in zip(entries, bodies)
     ]
 
 def get_ddg_news(name):
@@ -87,7 +140,23 @@ def get_ddg_news(name):
     except:
         return []
 
+def fetch_transcript(video_id, max_words=2000):
+    # Pulls captions for a YouTube video in English or Hindi.
+    # Capped at max_words so one very long speech doesn't dominate LDA.
+    if not video_id:
+        return ""
+    try:
+        entries = YouTubeTranscriptApi.get_transcript(
+            video_id, languages=["en", "hi"]
+        )
+        words = " ".join(e["text"] for e in entries).split()
+        return " ".join(words[:max_words])
+    except Exception:
+        return ""
+
 def get_youtube_text(name, limit=5):
+    # Titles + description + actual spoken transcript. The transcript is
+    # the biggest signal boost: it's what the leader actually said.
     try:
         results = VideosSearch(f"{name} speech", limit=limit).result()
         texts = []
@@ -95,10 +164,78 @@ def get_youtube_text(name, limit=5):
         for v in results['result']:
             title = v.get('title', '')
             desc = " ".join([d['text'] for d in v.get('descriptionSnippet', [])])
-            texts.append((title + " " + desc).lower())
+            transcript = fetch_transcript(v.get('id', ''))
+            texts.append((title + " " + desc + " " + transcript).lower())
 
         return texts
     except:
+        return []
+
+def get_official_channel_videos(name, limit=6):
+    # Look up the leader's main YouTube channel via a channel search,
+    # then fetch the most recent uploads from that channel's public
+    # RSS feed. Gives us direct "from the horse's mouth" speeches,
+    # not whatever YouTube search surfaces for "{name} speech".
+    try:
+        channels = ChannelsSearch(name, limit=1).result()
+        if not channels.get("result"):
+            return []
+        channel_id = channels["result"][0]["id"]
+    except Exception:
+        return []
+
+    feed = feedparser.parse(
+        f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    )
+
+    texts = []
+    for entry in feed.entries[:limit]:
+        video_id = getattr(entry, "yt_videoid", None)
+        if not video_id and entry.get("link"):
+            video_id = entry.link.split("v=")[-1].split("&")[0]
+
+        title = entry.get("title", "")
+        summary = entry.get("summary", "")
+        transcript = fetch_transcript(video_id) if video_id else ""
+        texts.append((title + " " + summary + " " + transcript).lower())
+    return texts
+
+def get_wikiquote(name):
+    # Wikiquote stores one quote per top-level <li>. Nested <li> inside
+    # that block is usually a source/attribution, which we skip by
+    # walking only the li's direct children until we hit a nested list.
+    try:
+        url = f"https://en.wikiquote.org/wiki/{name.replace(' ', '_')}"
+        res = requests.get(
+            url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6
+        )
+        if res.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(res.text, "html.parser")
+        content = soup.select_one(".mw-parser-output")
+        if not content:
+            return []
+
+        quotes = []
+        for li in content.select("ul > li"):
+            parts = []
+            for child in li.children:
+                if getattr(child, "name", None) in ("ul", "ol"):
+                    break
+                parts.append(
+                    child.get_text(" ", strip=True)
+                    if hasattr(child, "get_text")
+                    else str(child).strip()
+                )
+            text = " ".join(p for p in parts if p)
+            text = re.sub(r"\[\d+\]", "", text).strip()
+
+            if 5 < len(text.split()) < 80:
+                quotes.append(text.lower())
+
+        return quotes[:20]
+    except Exception:
         return []
 
 # PROCESSING
@@ -108,17 +245,23 @@ def get_combined_data(name):
         + get_bing_news(name)
         + get_ddg_news(name)
         + get_youtube_text(name)
+        + get_official_channel_videos(name)
+        + get_wikiquote(name)
     )
 
+    # Rank snippets: a +3 boost if the leader's name appears,
+    # plus a small bonus for longer texts (more content = more signal).
     scored = []
     for text in texts:
         score = (3 if name.lower() in text else 0) + len(text.split()) / 50
         scored.append((score, text))
 
     scored.sort(reverse=True)
-    return pd.DataFrame({"speech": [t for _, t in scored[:15]]})
+    return pd.DataFrame({"speech": [t for _, t in scored[:20]]})
 
 def clean(text):
+    # Drop URLs, keep only letters, lowercase, remove stopwords,
+    # lemmatize (running/ran -> run). Standard NLP text prep.
     text = re.sub(r'http\S+', '', text)
     text = re.sub(r'[^a-zA-Z ]', '', text.lower())
 
@@ -129,6 +272,9 @@ def clean(text):
     ])
 
 def get_topics(df, n_topics=3):
+    # LDA treats each document as a mix of n_topics "themes",
+    # and each theme as a distribution over words. We return the
+    # top-5 words per theme as its human-readable label.
     if df.empty:
         return []
 
@@ -162,7 +308,7 @@ def generate_wordcloud(texts):
         width=800,
         height=400,
         background_color='white',
-        font_path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        font_path=FONT_PATH,
     ).generate(text)
 
     img = io.BytesIO()
@@ -172,6 +318,9 @@ def generate_wordcloud(texts):
     return base64.b64encode(img.getvalue()).decode()
 
 def generate_knowledge_graph(texts, top_n=20):
+    # Nodes = the top_n most frequent words across all snippets.
+    # Edges = co-occurrence: two words appearing in the same snippet.
+    # Weight = how many snippets they both appear in.
     if not texts:
         return {"nodes": [], "edges": []}
 
@@ -182,12 +331,11 @@ def generate_knowledge_graph(texts, top_n=20):
     common = [w for w, _ in Counter(words).most_common(top_n)]
     nodes = [{"id": w, "label": w} for w in common]
 
-    # co-occurrence edges
     edge_weights = defaultdict(int)
 
     for t in texts:
         tokens = set(t.split()) & set(common)
-        for a, b in itertools.combinations(tokens, 2):
+        for a, b in itertools.combinations(sorted(tokens), 2):
             edge_weights[(a, b)] += 1
 
     edges = [
@@ -199,6 +347,10 @@ def generate_knowledge_graph(texts, top_n=20):
     return {"nodes": nodes, "edges": edges}
 
 def process_leader(name, n_topics):
+    key = _cache_key(name, n_topics)
+    if key in _CACHE:
+        return _CACHE[key]
+
     df = get_combined_data(name)
 
     if df.empty:
@@ -210,7 +362,7 @@ def process_leader(name, n_topics):
         lambda x: TextBlob(x).sentiment.polarity
     )
 
-    return {
+    result = {
         "leader": name,
         "speech_count": len(df),
         "avg_sentiment": df['sentiment'].mean(),
@@ -218,6 +370,8 @@ def process_leader(name, n_topics):
         "wordcloud": generate_wordcloud(df['clean'].tolist()),
         "graph": generate_knowledge_graph(df['clean'].tolist()),
     }
+    _CACHE[key] = result
+    return result
 
 #  APIs
 @app.get("/")
