@@ -21,6 +21,7 @@ import os
 import matplotlib
 from collections import Counter, defaultdict
 import itertools
+import gc
 
 matplotlib.use("Agg")
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
@@ -83,7 +84,7 @@ def fetch_article_body(url, max_words=500):
     except Exception:
         return ""
 
-def fetch_bodies_parallel(urls, max_workers=5):
+def fetch_bodies_parallel(urls, max_workers=2):
     if not urls:
         return []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -353,7 +354,8 @@ def health():
 
 @app.post("/compare")
 def compare(req: CompareRequest):
-    return {
-        name: process_leader(name, req.n_topics)
-        for name in req.leaders
-    }
+    results = {}
+    for name in req.leaders:
+        results[name] = process_leader(name, req.n_topics)
+        gc.collect()   # free memory between leaders
+    return results
