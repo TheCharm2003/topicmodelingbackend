@@ -344,7 +344,7 @@ def process_leader(name, n_topics):
     }
 
 #  APIs
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {"status": "Running"}
 
